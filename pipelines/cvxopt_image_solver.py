@@ -8,12 +8,12 @@ description: A pipeline that uses a Vision API to extract optimization problem p
 requirements: requests, pillow, cvxopt
 """
 
-import asyncio  # Sẽ cần cho việc chạy async từ sync nếu không sửa _extract_problem_from_image_api
+import asyncio 
 import base64
 import io
 import json
 import os
-from typing import (Any, Dict, Generator,  # Thay AsyncGenerator bằng Generator
+from typing import (Any, Dict, Generator,  
                     List, Optional, Union)
 
 import requests
@@ -26,6 +26,10 @@ from pydantic import BaseModel, Field
 
 
 class Pipeline:
+    """
+    Pipeline xử lý bài toán tối ưu từ hình ảnh.
+    Sử dụng Vision API để trích xuất tham số và CVXOPT để giải.
+    """
     class Valves(BaseModel):
         # ... (Valves giữ nguyên) ...
         VISION_API_URL: str = Field(default="https://openrouter.ai/api/v1/chat/completions", description="URL of the external Vision API endpoint.")
@@ -41,6 +45,10 @@ class Pipeline:
 
 
     def __init__(self):
+        """
+        Khởi tạo pipeline, thiết lập tên và cấu hình valves từ biến môi trường hoặc giá trị mặc định.
+        Cập nhật các tùy chọn cho CVXOPT solver.
+        """
         self.name = "CVXOPT Image Solver Pipeline"
         valves_defaults = self.Valves().model_dump()
         self.valves = self.Valves(
@@ -63,13 +71,23 @@ class Pipeline:
             print(f"[{self.name}] WARNING: VISION_API_KEY is not set. The pipeline will not function correctly.")
 
     async def on_startup(self): # Giữ async nếu OpenWebUI hỗ trợ
+        """
+        Hàm được gọi khi pipeline khởi động.
+        In thông báo pipeline đã khởi động.
+        """
         print(f"[{self.name}] Started.")
 
     async def on_shutdown(self): # Giữ async nếu OpenWebUI hỗ trợ
+        """
+        Hàm được gọi khi pipeline tắt.
+        In thông báo pipeline đang tắt.
+        """
         print(f"[{self.name}] Shutting down.")
 
     def _update_cvxopt_options(self):
-        # ... (giữ nguyên) ...
+        """
+        Cập nhật các tùy chọn của CVXOPT solver dựa trên cấu hình valves.
+        """
         cvxopt_solver_options["show_progress"] = self.valves.CVXOPT_SHOW_PROGRESS
         cvxopt_solver_options["maxiters"] = self.valves.CVXOPT_MAXITERS
         cvxopt_solver_options["abstol"] = self.valves.CVXOPT_ABSTOL
@@ -78,7 +96,15 @@ class Pipeline:
         cvxopt_solver_options["refinement"] = self.valves.CVXOPT_REFINEMENT
 
     def _encode_image_to_base64(self, image_bytes: bytes) -> Optional[str]:
-        # ... (giữ nguyên) ...
+        """
+        Mã hóa bytes của hình ảnh sang chuỗi base64.
+
+        Args:
+            image_bytes: Bytes của hình ảnh.
+
+        Returns:
+            Chuỗi base64 của hình ảnh hoặc None nếu có lỗi.
+        """
         try:
             return base64.b64encode(image_bytes).decode("utf-8")
         except Exception as e:
@@ -86,7 +112,15 @@ class Pipeline:
             return None
 
     def _get_image_mime_type(self, image_filename: str) -> str:
-        # ... (giữ nguyên, đã sửa ở lần trước) ...
+        """
+        Xác định kiểu MIME của hình ảnh dựa trên phần mở rộng của tên file.
+
+        Args:
+            image_filename: Tên file hình ảnh.
+
+        Returns:
+            Chuỗi kiểu MIME (ví dụ: 'image/png') hoặc 'application/octet-stream' nếu không xác định được.
+        """
         ext = ""
         if "." in image_filename:
             ext = image_filename.split(".")[-1].lower()
@@ -102,7 +136,17 @@ class Pipeline:
     def _format_solver_output(
         self, result: Optional[Dict[str, Any]], problem_type: str, objective_type: str
     ) -> str:
-        # ... (giữ nguyên, đã sửa ở lần trước) ...
+        """
+        Định dạng kết quả từ CVXOPT solver thành chuỗi văn bản dễ đọc.
+
+        Args:
+            result: Dictionary chứa kết quả từ solver.
+            problem_type: Loại bài toán ('LP', 'QP', 'CONELP').
+            objective_type: Loại mục tiêu ('minimize' hoặc 'maximize').
+
+        Returns:
+            Chuỗi văn bản mô tả kết quả giải bài toán.
+        """
         if result is None:
             return f"Lỗi: Không có kết quả từ solver cho bài toán {problem_type}."
 
@@ -142,10 +186,21 @@ class Pipeline:
                  output_str += f"Giá trị mục tiêu (có thể không tối ưu): {result['primal objective']:.6f}\n"
         return output_str.strip()
 
-    # THAY ĐỔI QUAN TRỌNG: Chuyển hàm này thành đồng bộ
     def _extract_problem_from_image_api(
         self, image_bytes: bytes, image_filename: str, prompt_instruction: Optional[str]
     ) -> Union[Dict[str, Any], str]:
+        """
+        Gọi Vision API để trích xuất các tham số của bài toán tối ưu từ hình ảnh.
+
+        Args:
+            image_bytes: Bytes của hình ảnh.
+            image_filename: Tên file hình ảnh (để xác định MIME type).
+            prompt_instruction: Hướng dẫn bổ sung từ người dùng cho Vision API.
+
+        Returns:
+            Dictionary chứa các tham số của bài toán nếu thành công,
+            hoặc chuỗi thông báo lỗi nếu thất bại.
+        """
         if not self.valves.VISION_API_KEY:
             return "Lỗi cấu hình: VISION_API_KEY chưa được cung cấp. Vui lòng cấu hình trong Valves."
 
@@ -200,7 +255,6 @@ class Pipeline:
         api_response_json = None
         content_extracted = ""
         try:
-            # requests.post là đồng bộ
             response = requests.post(self.valves.VISION_API_URL, headers=headers, json=payload, timeout=120)
             response.raise_for_status()
             api_response_json = response.json()
@@ -224,15 +278,33 @@ class Pipeline:
         except Exception as e: return f"[{self.name}] Lỗi không xác định Vision API: {e}. Response: {api_response_json}"
 
 
-    # THAY ĐỔI QUAN TRỌNG: Chuyển pipe thành đồng bộ (def) và trả về Generator
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
-    ) -> Union[str, Generator[str, None, None]]: # Union[str, Generator]
+    ) -> Union[str, Generator[str, None, None]]: 
+        """
+        Hàm chính xử lý yêu cầu của người dùng.
+        Quy trình:
+        1. Kiểm tra VISION_API_KEY.
+        2. Trích xuất hình ảnh từ `messages` hoặc `body['files']`.
+        3. Trích xuất prompt bổ sung từ người dùng.
+        4. Gọi `_extract_problem_from_image_api` để lấy dữ liệu bài toán từ Vision API.
+        5. Chuẩn bị dữ liệu cho CVXOPT solver.
+        6. Gọi CVXOPT solver tương ứng (LP, QP, CONELP).
+        7. Định dạng và trả về kết quả.
+
+        Args:
+            user_message: Tin nhắn từ người dùng (thường là prompt cuối cùng).
+            model_id: ID của model được yêu cầu (không dùng trực tiếp trong logic này).
+            messages: Lịch sử tin nhắn, dùng để lấy ảnh và prompt.
+            body: Request body, chứa thông tin stream và files (ảnh đính kèm).
+
+        Returns:
+            Chuỗi kết quả hoặc một generator nếu streaming được yêu cầu.
+        """
         
         print(f"[{self.name}] SYNC Pipe called. User message: '{user_message}', Model: '{model_id}', Stream: {body.get('stream')}")
         
         if not self.valves.VISION_API_KEY:
-            # Nếu stream=true, chúng ta cần yield lỗi. Nếu không thì return.
             error_msg = "Lỗi cấu hình: VISION_API_KEY chưa được cung cấp."
             if body.get("stream", False):
                 yield error_msg
@@ -287,7 +359,7 @@ class Pipeline:
         if messages:
             last_message_content = messages[-1].get("content") if messages else None
             if isinstance(last_message_content, list):
-                for item_prompt in last_message_content: # Đổi tên biến để không trùng
+                for item_prompt in last_message_content: 
                     if isinstance(item_prompt, dict) and item_prompt.get("type") == "text":
                         user_text_prompt = item_prompt.get("text", "")
                         break
@@ -296,7 +368,6 @@ class Pipeline:
 
         print(f"[{self.name}] Using additional prompt: '{user_text_prompt}'")
 
-        # Gọi hàm _extract_problem_from_image_api (đã là đồng bộ)
         problem_data_or_error = self._extract_problem_from_image_api(
             image_info["bytes"], image_info["filename"], user_text_prompt
         )
@@ -308,7 +379,6 @@ class Pipeline:
         problem_data = problem_data_or_error
         print(f"[{self.name}] Problem data: {json.dumps(problem_data, indent=2)}")
 
-        # ... (Phần xử lý CVXOPT giữ nguyên logic, chỉ cần đảm bảo return/yield đúng cách) ...
         problem_type = problem_data.get("problem_type", "LP").upper()
         objective_type = problem_data.get("objective_type", "minimize").lower()
         c_list = problem_data.get("c"); G_list = problem_data.get("G"); h_list = problem_data.get("h")
