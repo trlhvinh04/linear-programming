@@ -29,7 +29,7 @@ class Pipeline:
             description="URL của Vision API endpoint."
         )
         VISION_API_KEY: str = Field(
-            default="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",
+            default="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",
             description="API Key cho Vision API (bắt buộc)."
         )
         VISION_MODEL_ID: str = Field(
@@ -301,11 +301,11 @@ class Pipeline:
         # --- Bước 5: Tìm từ khóa method trong user_text_prompt ---
         low = user_text_prompt.lower()
         user_method = None
-        if "method=đơn hình" in low or "method=dantzig" in low:
+        if "đơn hình" in low or "dantzig" in low:
             user_method = "dantzig"
-        elif "method=bland" in low:
+        elif "bland" in low:
             user_method = "bland"
-        elif ("method=two-phase" in low or "method=two phase" in low or "method=two_phase" in low or "method=2 pha" in low or "method=hai pha" in low):
+        elif "hai pha" in low or "2 pha" in low or "two-phase" in low or "two phase" in low:
             user_method = "two-phase"
         # Nếu không tìm thấy, user_method vẫn là None → solver tự quyết
 
