@@ -4,8 +4,8 @@ author: Your Name
 date: 2024-08-16
 version: 1.2 # Incremented version
 license: MIT
-description: A pipeline that uses a Vision API to extract optimization problem parameters from an image and solves it using CVXOPT.
-requirements: requests, pillow, cvxopt
+description: A pipeline that uses a Vision API to extract optimization problem parameters from an image and solves it using a custom LP solver.
+requirements: requests, pillow, numpy
 """
 
 import os
@@ -29,8 +29,8 @@ class Pipeline:
             description="URL của Vision API endpoint."
         )
         VISION_API_KEY: str = Field(
-            default="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",
-            description=""
+            default="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",
+            description="API Key cho Vision API (bắt buộc)."
         )
         VISION_MODEL_ID: str = Field(
             default="qwen/qwen2.5-vl-72b-instruct:free",
@@ -65,7 +65,7 @@ class Pipeline:
     def _encode_image_to_base64(self, image_bytes: bytes) -> str:
         try:
             return base64.b64encode(image_bytes).decode("utf-8")
-        except:
+        except Exception:
             return ""
 
     def _get_image_mime_type(self, image_filename: str) -> str:
@@ -99,7 +99,7 @@ class Pipeline:
 
         # Prompt cố định để Vision API trả về JSON hợp lệ
         user_prompt = """
-        QUAN TRỌNG TUYỆT ĐỐI: Phản hồi của bạn BẮT BUỘC CHỈ ĐƯỢC PHÉP LÀ MỘT ĐỐI TƯỢNG JSON HỢP LỆ. KHÔNG được có bất kỳ ký tự, từ ngữ, câu văn, lời giải thích, lời chào, hay bất kỳ văn bản nào khác nằm ngoài bản thân đối tượng JSON đó. Phản hồi phải bắt đầu bằng '{' và kết thúc bằng '}'. Nếu bạn không thể trích xuất thành JSON, hãy trả về một đối tượng JSON rỗng là {}."
+        QUAN TRỌNG TUYỆT ĐỐI: Phản hồi của bạn BẮT BUỘC CHỈ ĐƯỢC PHÉP LÀ MỘT ĐỐI TƯỢNG JSON HỢP LỆ. KHÔNG được có bất kỳ ký tự, từ ngữ, câu văn, lời giải thích, lời chào, hay bất kỳ văn bản nào khác nằm ngoài bản thân đối tượng JSON đó. Phản hồi phải bắt đầu bằng '{' và kết thúc bằng '}'. Nếu bạn không thể trích xuất thành JSON, hãy trả về một đối tượng JSON rỗng là {}.
         
         Bạn là một chuyên gia toán học có khả năng đọc hiểu và trích xuất thông tin từ hình ảnh các bài toán tối ưu.
         Từ hình ảnh được cung cấp, hãy trích xuất các thành phần của bài toán Quy hoạch Tuyến tính (LP), Quy hoạch Toàn phương (QP), hoặc Quy hoạch Conic Bậc hai (CONELP).
@@ -111,7 +111,7 @@ class Pipeline:
            - Nếu gặp 'expr >= val', chuyển thành '-expr <= -val'.
            - Ràng buộc biến như 'x >= 0' phải được chuyển thành '-x <= 0'.
         6. Các ma trận ràng buộc đẳng thức 'A' và vector vế phải 'b' (nếu có, nếu không thì null hoặc danh sách rỗng).
-        7. (Chỉ cho CONELP) Thông số 'dims' mô tả kích thước của các nón. Ví dụ: {"l": số_ràng_buộc_tuyến_tính, "q": [kích_thước_nón_SOC_1, kích_thước_nón_SOC_2,...], "s": [kích_thước_ma_trận_SDP_1,...]}. Nếu không phải CONELP hoặc không có ràng buộc conic, để dims là null hoặc {"l": tổng_số_ràng_buộc_trong_G, "q": [], "s": []}.
+        7. (Chỉ cho CONELP) Thông số 'dims' mô tả kích thước của các nón. Ví dụ: {"l": số_ràng_buộc_tuyến_tính, "q": [kích_thước_nón_SOC_1, ...], "s": [kích_thước_ma_trận_SDP_1,...]}. Nếu không phải CONELP hoặc không có ràng buộc conic, để dims là null hoặc {"l": tổng_số_ràng_buộc_trong_G, "q": [], "s": []}.
 
         Hãy trả về kết quả dưới dạng một đối tượng JSON.
         Ví dụ LP:
@@ -180,10 +180,12 @@ class Pipeline:
         self, user_message: str, model_id: str, messages: list, body: dict
     ) -> str:
         """
-        Xử lý request, chỉ support LP.
+        Xử lý request, chỉ hỗ trợ LP. 
+        Cho phép user nhập thêm 'method=dantzig', 'method=bland' hoặc 'method=two-phase' trong prompt.
         """
         print(f"[{self.name}] PIPE called. Stream? {body.get('stream', False)}")
 
+        # Bước 0: Kiểm tra Vision API Key
         if not self.valves.VISION_API_KEY:
             return "Lỗi cấu hình: VISION_API_KEY chưa được cấp."
 
@@ -218,7 +220,7 @@ class Pipeline:
         if not image_info:
             return "Lỗi: Không tìm thấy hình ảnh."
 
-        # --- Bước 2: Lấy prompt text bổ sung ---
+        # --- Bước 2: Lấy prompt text bổ sung (user_text_prompt) ---
         user_text_prompt = ""
         if messages:
             last = messages[-1]
@@ -240,84 +242,91 @@ class Pipeline:
             image_info["bytes"], image_info["filename"], user_text_prompt
         )
         if not ok:
-            return problem_or_err  # Là lỗi
+            return problem_or_err  # Trả về lỗi ngay
 
         problem_data = problem_or_err
         print(f"[{self.name}] Problem data: {json.dumps(problem_data, indent=2)}")
 
-        # --- Bước 4: Đọc thông tin LP ---
-        problem_type = problem_data.get("problem_type", "LP").upper()
+        # --- Bước 4: Đọc và chuẩn hóa thông tin LP ---
+        problem_type   = problem_data.get("problem_type", "LP").upper()
         objective_type = problem_data.get("objective_type", "minimize").lower()
-        c_list = problem_data.get("c")
-        G_list = problem_data.get("G")
-        h_list = problem_data.get("h")
-        A_list = problem_data.get("A")
-        b_list = problem_data.get("b")
+        c_list         = problem_data.get("c")
+        G_list         = problem_data.get("G")
+        h_list         = problem_data.get("h")
+        A_list         = problem_data.get("A")
+        b_list         = problem_data.get("b")
 
         # Chỉ hỗ trợ LP
         if problem_type != "LP":
-            return f"Lỗi: Chỉ hỗ trợ LP. Loại bài toán '{problem_type}' chưa hỗ trợ."
+            return f"Lỗi: Chỉ hỗ trợ Linear Programming. Loại bài toán '{problem_type}' chưa hỗ trợ."
 
-        # Kiểm tra dữ liệu
+        # Kiểm tra c, G, h là list
         if not (isinstance(c_list, list) and isinstance(G_list, list) and isinstance(h_list, list)):
             return "Lỗi: c, G, h phải là danh sách."
 
         try:
-            # Chuyển c, G, h sang numpy
+            # Chuyển c sang float
             c_internal = [float(x) for x in c_list]
             num_vars = len(c_internal)
 
-            # G_matrix (mảng 2D) và h_vector
+            # G_matrix và h_vector
             G_np = np.array(G_list, dtype=float)
             h_np = np.array(h_list, dtype=float)
-
             num_cons = len(h_np)
 
-            # Nếu có A, b (constraint đẳng thức), ta ghép vào G và h với dấu = (constraint_signs = 0)
+            # Nếu có A, b (constraint đẳng thức), ghép vào
             if A_list and b_list:
                 A_np = np.array(A_list, dtype=float)
                 b_np = np.array(b_list, dtype=float)
                 if A_np.shape[1] != num_vars or b_np.ndim != 1 or A_np.shape[0] != b_np.shape[0]:
                     raise ValueError("Kích thước A/b không khớp với số biến.")
-                # Ghép G và A: hàng G (dấu ≤), hàng A (dấu =)
                 combined_matrix = np.vstack([G_np, A_np])
-                combined_rhs = np.concatenate([h_np, b_np])
-                # constraint_signs: -1 cho ≤, 0 cho =
+                combined_rhs    = np.concatenate([h_np, b_np])
                 signs_G = [-1] * num_cons
                 signs_A = [0] * A_np.shape[0]
-                combined_signs = np.array(signs_G + signs_A, dtype=int)
-                # Cập nhật lại G_np, h_np, num_cons
+                constraint_signs = np.array(signs_G + signs_A, dtype=int)
                 G_np = combined_matrix
                 h_np = combined_rhs
                 num_cons = G_np.shape[0]
-                constraint_signs = combined_signs
             else:
                 # Chỉ Gx ≤ h
                 constraint_signs = np.array([-1] * num_cons, dtype=int)
 
-            # Mặc định các biến x ≥ 0
+            # Mặc định biến x ≥ 0
             variable_signs = np.array([1] * num_vars, dtype=int)
 
         except (ValueError, TypeError) as e:
             return f"Lỗi chuẩn bị dữ liệu LP: {e}"
 
-        # --- Bước 5: Khởi tạo và giải bằng LinearProgrammingProblem ---
+        # --- Bước 5: Tìm từ khóa method trong user_text_prompt ---
+        low = user_text_prompt.lower()
+        user_method = None
+        if "method=đơn hình" in low or "method=dantzig" in low:
+            user_method = "dantzig"
+        elif "method=bland" in low:
+            user_method = "bland"
+        elif ("method=two-phase" in low or "method=two phase" in low or "method=two_phase" in low or "method=2 pha" in low or "method=hai pha" in low):
+            user_method = "two-phase"
+        # Nếu không tìm thấy, user_method vẫn là None → solver tự quyết
+
+        # --- Bước 6: Khởi tạo và giải bằng LinearProgrammingProblem ---
         is_min_flag = (objective_type == "minimize")
+        lp_solver = LinearProgrammingProblem(
+            num_vars=num_vars,
+            num_cons=num_cons,
+            is_min=is_min_flag,
+            obj_coeffs=np.array(c_internal, dtype=float),
+            constraint_matrix=G_np,
+            constraint_rhs=h_np,
+            constraint_signs=constraint_signs,
+            variable_signs=variable_signs
+        )
 
         try:
-            lp_solver = LinearProgrammingProblem(
-                num_vars=num_vars,
-                num_cons=num_cons,
-                is_min=is_min_flag,
-                obj_coeffs=np.array(c_internal, dtype=float),
-                constraint_matrix=G_np,
-                constraint_rhs=h_np,
-                constraint_signs=constraint_signs,
-                variable_signs=variable_signs
-            )
-            output_html = lp_solver.solve()
+            # Truyền vào method nếu user đã chỉ định
+            result_text = lp_solver.solve(method=user_method)
         except Exception as e:
-            return f"Lỗi khi chạy custom LP solver: {e}"
+            return f"Lỗi khi chạy LP solver: {e}"
 
-        # --- Bước 6: Trả kết quả ---
-        return output_html
+        # --- Bước 7: Trả kết quả (plain-text) ---
+        return result_text
