@@ -134,7 +134,7 @@ async def load_module_from_path(module_name, module_path):
 
     try:
         # Read the module content
-        with open(module_path, "r") as file:
+        with open(module_path, "r", encoding="utf-8") as file:
             content = file.read()
 
         # Parse frontmatter
@@ -190,7 +190,7 @@ async def load_modules_from_directory(directory):
             # Create a valves.json file if it doesn't exist
             valves_json_path = os.path.join(subfolder_path, "valves.json")
             if not os.path.exists(valves_json_path):
-                with open(valves_json_path, "w") as f:
+                with open(valves_json_path, "w", encoding="utf-8") as f:
                     json.dump({}, f)
                 logging.info(f"Created valves.json in: {subfolder_path}")
 
@@ -577,7 +577,7 @@ async def update_valves(pipeline_id: str, form_data: dict):
         valves_json_path = os.path.join(subfolder_path, "valves.json")
 
         # Save the updated valves data back to the valves.json file
-        with open(valves_json_path, "w") as f:
+        with open(valves_json_path, "w", encoding="utf-8") as f:
             json.dump(valves.model_dump(), f)
 
         if hasattr(pipeline, "on_valves_updated"):
