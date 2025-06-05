@@ -29,7 +29,7 @@ class Pipeline:
             description="URL của Vision API endpoint."
         )
         VISION_API_KEY: str = Field(
-            default="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",
+            default="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",
             description=""
         )
         VISION_MODEL_ID: str = Field(
