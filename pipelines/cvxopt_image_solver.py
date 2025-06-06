@@ -7,17 +7,25 @@ from pydantic import BaseModel, Field
 from solver import LinearProgrammingProblem  # solver.py đã có sẵn, không cần sửa
     
 
+API_KEYS = [
+    "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",
+    "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",
+    "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",
+    "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",
+]
+
 class Pipeline:
     """
     Pipeline xử lý LP từ hình ảnh. 
     Chỉ đảm nhận việc:
       - Gọi Vision API, parse JSON
-      - Chuyển constraint “≥ → ≤”
+      - Chuyển constraint "≥ → ≤"
       - Ghép G và A (nếu có) mà không báo lỗi khi A/b = None hoặc rỗng
       - Ghép mảng variable_signs trực tiếp xuống solver để solver tự xử lý biến.
-      - Nếu trong prompt có chứa “dantzig”/“đơn hình” → force dùng Dantzig
-        Nếu có chứa “bland” → force dùng Bland
-        Nếu có chứa “hai pha”/“2 pha”/“two phase”/“two-phase” → force dùng Two‐phase
+      - Nếu trong prompt có chứa "dantzig"/"đơn hình" → force dùng Dantzig
+        Nếu có chứa "bland" → force dùng Bland
+        Nếu có chứa "hai pha"/"2 pha"/"two phase"/"two-phase" → force dùng Two‐phase
+      - Xoay vòng API keys khi gặp lỗi kết nối
     """
 
     class Valves(BaseModel):
@@ -26,7 +34,7 @@ class Pipeline:
             description="URL của Vision API endpoint."
         )
         VISION_API_KEY: str = Field(
-            default="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",
+            default="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",
             description="API Key cho Vision API (bắt buộc)."
         )
         VISION_MODEL_ID: str = Field(
@@ -40,6 +48,7 @@ class Pipeline:
 
     def __init__(self):
         self.name = "LP Image Solver Pipeline (Custom)"
+        self.current_api_key_index = 0  # Theo dõi API key hiện tại
         valves_defaults = self.Valves().model_dump()
         self.valves = self.Valves(
             **{
@@ -52,6 +61,18 @@ class Pipeline:
         print(f"[{self.name}] Initialized. Vision API Key set: {'Yes' if self.valves.VISION_API_KEY else 'No (REQUIRED!)'}")
         if not self.valves.VISION_API_KEY:
             print(f"[{self.name}] WARNING: VISION_API_KEY is empty! Pipeline sẽ không hoạt động đúng.")
+
+    def _get_current_api_key(self) -> str:
+        """Lấy API key hiện tại theo index"""
+        if API_KEYS:
+            return API_KEYS[self.current_api_key_index]
+        return self.valves.VISION_API_KEY
+
+    def _rotate_api_key(self):
+        """Chuyển sang API key tiếp theo (xoay vòng)"""
+        if API_KEYS:
+            self.current_api_key_index = (self.current_api_key_index + 1) % len(API_KEYS)
+            print(f"[{self.name}] Chuyển sang API key thứ {self.current_api_key_index + 1}")
 
     async def on_startup(self):
         print(f"[{self.name}] Started.")
@@ -81,7 +102,7 @@ class Pipeline:
         self, image_bytes: bytes, image_filename: str, prompt_instruction: str
     ) -> tuple[bool, dict | str]:
         """
-        Gọi Vision API, parse JSON LP:
+        Gọi Vision API, parse JSON LP với khả năng xoay vòng API keys khi gặp lỗi:
         {
           "problem_type": "LP",
           "objective_type": "maximize"/"minimize",
@@ -97,18 +118,15 @@ class Pipeline:
         Nếu thiếu khóa quan trọng hoặc lỗi parse, trả về False + thông báo lỗi.
         """
 
-        if not self.valves.VISION_API_KEY:
-            return False, "Lỗi cấu hình: VISION_API_KEY chưa được cấp."
+        current_api_key = self._get_current_api_key()
+        if not current_api_key:
+            return False, "Lỗi cấu hình: Không có API key khả dụng."
 
         base64_image = self._encode_image_to_base64(image_bytes)
         if not base64_image:
             return False, "Lỗi: Không thể mã hóa hình ảnh."
 
         mime_type = self._get_image_mime_type(image_filename)
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.valves.VISION_API_KEY}",
-        }
 
         user_prompt = """
         QUAN TRỌNG: Chỉ trả về một đối tượng JSON. Ví dụ (LP):
@@ -123,65 +141,114 @@ class Pipeline:
           "b": [5.0],           # nếu có
           "variable_signs": [1, -1]
         }
-        - constraint_signs[i] = -1 nghĩa là “≤”, =0 nghĩa là “=”, =+1 nghĩa là “≥”.
+        - constraint_signs[i] = -1 nghĩa là "≤", =0 nghĩa là "=", =+1 nghĩa là "≥".
         - variable_signs[j]   =  1 nghĩa là x_j ≥ 0, =0 nghĩa là x_j tự do, =-1 nghĩa là x_j ≤ 0.
         Nếu không trích được, trả về {}.
         """
         if prompt_instruction:
             user_prompt += f"\n\nLưu ý thêm: {prompt_instruction}"
 
-        payload = {
-            "model": self.valves.VISION_MODEL_ID,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}},
-                    ],
-                }
-            ],
-            "max_tokens": self.valves.MAX_TOKENS_VISION_API,
-        }
+        # Thử tất cả API keys nếu gặp lỗi
+        initial_key_index = self.current_api_key_index
+        max_api_retries = len(API_KEYS) if API_KEYS else 1
+        max_json_retries = 5  # Số lần thử lại cho JSON parse error
+        
+        for api_attempt in range(max_api_retries):
+            current_api_key = self._get_current_api_key()
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {current_api_key}",
+            }
 
-        try:
-            resp = requests.post(self.valves.VISION_API_URL, headers=headers, json=payload, timeout=120)
-            resp.raise_for_status()
-            api_resp = resp.json()
-            content = api_resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if not content:
-                return False, "Lỗi: Vision API không trả về nội dung."
+            payload = {
+                "model": self.valves.VISION_MODEL_ID,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}},
+                        ],
+                    }
+                ],
+                "max_tokens": self.valves.MAX_TOKENS_VISION_API,
+            }
 
-            # Nếu output có ```json ... ```, bóc ra
-            if content.strip().startswith("```json"):
-                content = content.strip()[7:]
-                if content.strip().endswith("```"):
-                    content = content.strip()[:-3]
+            # Thử với API key hiện tại, có retry cho JSON parse error
+            for json_attempt in range(max_json_retries):
+                try:
+                    print(f"[{self.name}] Thử API key thứ {self.current_api_key_index + 1} (API attempt {api_attempt + 1}/{max_api_retries}, JSON attempt {json_attempt + 1}/{max_json_retries})")
+                    resp = requests.post(self.valves.VISION_API_URL, headers=headers, json=payload, timeout=120)
+                    resp.raise_for_status()
+                    api_resp = resp.json()
+                    content = api_resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if not content:
+                        if json_attempt < max_json_retries - 1:
+                            print(f"[{self.name}] Vision API không trả về nội dung, thử lại...")
+                            continue
+                        else:
+                            break  # Chuyển sang API key khác
 
-            problem_data = json.loads(content.strip())
+                    # Nếu output có ```json ... ```, bóc ra
+                    if content.strip().startswith("```json"):
+                        content = content.strip()[7:]
+                        if content.strip().endswith("```"):
+                            content = content.strip()[:-3]
 
-            required = ["problem_type", "objective_type", "c", "G", "h"]
-            missing = [k for k in required if k not in problem_data]
-            if missing:
-                return False, f"JSON thiếu khóa: {', '.join(missing)}"
+                    problem_data = json.loads(content.strip())
 
-            # Đảm bảo có ít nhất hai mảng dấu; nếu không, sẽ tự gán None
-            problem_data.setdefault("constraint_signs", None)
-            problem_data.setdefault("variable_signs", None)
-            # Đảm bảo A, b tồn tại (có thể None)
-            problem_data.setdefault("A", None)
-            problem_data.setdefault("b", None)
+                    required = ["problem_type", "objective_type", "c", "G", "h"]
+                    missing = [k for k in required if k not in problem_data]
+                    if missing:
+                        if json_attempt < max_json_retries - 1:
+                            print(f"[{self.name}] JSON thiếu khóa: {', '.join(missing)}, thử lại...")
+                            continue
+                        else:
+                            break  # Chuyển sang API key khác
 
-            return True, problem_data
+                    # Đảm bảo có ít nhất hai mảng dấu; nếu không, sẽ tự gán None
+                    problem_data.setdefault("constraint_signs", None)
+                    problem_data.setdefault("variable_signs", None)
+                    # Đảm bảo A, b tồn tại (có thể None)
+                    problem_data.setdefault("A", None)
+                    problem_data.setdefault("b", None)
 
-        except requests.exceptions.Timeout:
-            return False, f"[{self.name}] Lỗi: Vision API timeout."
-        except requests.exceptions.RequestException as e:
-            return False, f"[{self.name}] Lỗi kết nối Vision API: {e}"
-        except json.JSONDecodeError as e:
-            return False, f"[{self.name}] Lỗi parse JSON: {e}. Raw: {content[:200]}"
-        except Exception as e:
-            return False, f"[{self.name}] Lỗi không xác định: {e}"
+                    print(f"[{self.name}] API key thứ {self.current_api_key_index + 1} thành công!")
+                    return True, problem_data
+
+                except requests.exceptions.Timeout:
+                    error_msg = f"[{self.name}] Lỗi: Vision API timeout với key thứ {self.current_api_key_index + 1}."
+                    print(error_msg)
+                    break  # Chuyển sang API key khác
+                    
+                except requests.exceptions.RequestException as e:
+                    error_msg = f"[{self.name}] Lỗi kết nối Vision API với key thứ {self.current_api_key_index + 1}: {e}"
+                    print(error_msg)
+                    break  # Chuyển sang API key khác
+                    
+                except json.JSONDecodeError as e:
+                    error_msg = f"[{self.name}] Lỗi parse JSON với key thứ {self.current_api_key_index + 1} (lần {json_attempt + 1}): {e}. Raw: {content[:200] if 'content' in locals() else 'N/A'}"
+                    print(error_msg)
+                    if json_attempt < max_json_retries - 1:
+                        continue  # Thử lại với cùng API key
+                    else:
+                        # Đã thử hết 5 lần với API key này, kiểm tra xem còn API key khác không
+                        if api_attempt < max_api_retries - 1:
+                            break  # Chuyển sang API key khác
+                        else:
+                            # Đã thử hết tất cả API keys và JSON retries
+                            return False, "Hệ thống vừa bị lỗi, bạn hãy nhập lại yêu cầu"
+                    
+                except Exception as e:
+                    error_msg = f"[{self.name}] Lỗi không xác định với key thứ {self.current_api_key_index + 1}: {e}"
+                    print(error_msg)
+                    break  # Chuyển sang API key khác
+
+            # Chuyển sang API key tiếp theo nếu chưa hết
+            if api_attempt < max_api_retries - 1:
+                self._rotate_api_key()
+
+        return False, f"[{self.name}] Đã thử tất cả {max_api_retries} API keys nhưng đều thất bại."
 
     def pipe(
         self, user_message: str, model_id: str, messages: list, body: dict
@@ -317,7 +384,7 @@ class Pipeline:
         except (ValueError, TypeError) as e:
             return f"Lỗi chuẩn bị dữ liệu LP: {e}"
 
-        # --- (5) CHUYỂN QUERY “≥ → ≤” (nếu constraint_signs[i] == +1) ---
+        # --- (5) CHUYỂN QUERY "≥ → ≤" (nếu constraint_signs[i] == +1) ---
         for i, s in enumerate(constraint_signs):
             if s == 1:
                 # a_i x ≥ b_i  →  (−a_i) x ≤ −b_i
@@ -325,7 +392,7 @@ class Pipeline:
                 h_np[i]       *= -1
                 constraint_signs[i] = -1
 
-        # CHÚ Ý: KHÔNG tự đổi biến “x ≤ 0 → x' ≥ 0” tại đây.
+        # CHÚ Ý: KHÔNG tự đổi biến "x ≤ 0 → x' ≥ 0" tại đây.
         # Solver.py đã có sẵn logic để xử lý variable_signs.
 
         # --- (6) Khởi tạo solver và (nếu cần) áp override thuật toán ---
