@@ -34,12 +34,36 @@ class LinearProgrammingProblem:
 
         # Build a textual log of iterations
         output = ""
-        output += "Method: " + algo_name + "\n\n"
+        output += "## Method: " + algo_name + "\n\n"
 
         for i, arr in enumerate(tableau_list):
-            output += f"Iteration {i+1}:\n"
-            for row in arr:
-                output += "  " + str(row) + "\n"
+            output += f"### Iteration {i+1}:\n\n"
+            
+            # Create empty headers for proper markdown table formatting
+            num_cols = arr.shape[1]
+            
+            # Create empty header row
+            output += "|" + "|".join([" " for _ in range(num_cols)]) + "|\n"
+            
+            # Create separator row
+            output += "|" + "|".join([":---:" for _ in range(num_cols)]) + "|\n"
+            
+            # Create data rows
+            for row_idx, row in enumerate(arr):
+                output += "|"
+                for element in row:
+                    # Format numbers to avoid very long decimals
+                    if isinstance(element, (int, float)):
+                        if abs(element) < 1e-10:  # Treat very small numbers as 0
+                            formatted_element = "0"
+                        elif element == int(element):  # If it's effectively an integer
+                            formatted_element = str(int(element))
+                        else:
+                            formatted_element = f"{element:.3f}"  # 3 decimal places for better readability
+                    else:
+                        formatted_element = str(element)
+                    output += f" {formatted_element} |"
+                output += "\n"
             output += "\n"
 
         result_text = self.process_output(tableau, check)
@@ -53,43 +77,74 @@ class LinearProgrammingProblem:
     def display(self):
         objective_function = ""
         if self.is_min:
-            objective_function = "Min z = "
+            objective_function = "$\\min z = "
         else:
-            objective_function = "Max z = "
+            objective_function = "$\\max z = "
 
         for j in range(self.num_vars):
             coefficient = self.obj_coeffs[j]
-            if coefficient >= 0 and j != 0:
-                objective_function += " + " + str(coefficient) + "x" + str(j + 1)
+            if j == 0:
+                if coefficient == 1:
+                    objective_function += f"x_{{{j + 1}}}"
+                elif coefficient == -1:
+                    objective_function += f"-x_{{{j + 1}}}"
+                else:
+                    objective_function += f"{coefficient}x_{{{j + 1}}}"
             else:
-                objective_function += str(coefficient) + "x" + str(j + 1)
+                if coefficient > 0:
+                    if coefficient == 1:
+                        objective_function += f" + x_{{{j + 1}}}"
+                    else:
+                        objective_function += f" + {coefficient}x_{{{j + 1}}}"
+                elif coefficient < 0:
+                    if coefficient == -1:
+                        objective_function += f" - x_{{{j + 1}}}"
+                    else:
+                        objective_function += f" {coefficient}x_{{{j + 1}}}"
+        objective_function += "$"
         print(objective_function)
 
+        print("Subject to:")
         for i in range(self.num_cons):
-            constraint = ""
+            constraint = "$"
             for j in range(self.num_vars):
                 coefficient = self.constraint_matrix[i, j]
-                if coefficient >= 0 and j != 0:
-                    constraint += " + " + str(coefficient) + "x" + str(j + 1)
+                if j == 0:
+                    if coefficient == 1:
+                        constraint += f"x_{{{j + 1}}}"
+                    elif coefficient == -1:
+                        constraint += f"-x_{{{j + 1}}}"
+                    elif coefficient != 0:
+                        constraint += f"{coefficient}x_{{{j + 1}}}"
                 else:
-                    constraint += str(coefficient) + "x" + str(j + 1)
+                    if coefficient > 0:
+                        if coefficient == 1:
+                            constraint += f" + x_{{{j + 1}}}"
+                        else:
+                            constraint += f" + {coefficient}x_{{{j + 1}}}"
+                    elif coefficient < 0:
+                        if coefficient == -1:
+                            constraint += f" - x_{{{j + 1}}}"
+                        else:
+                            constraint += f" {coefficient}x_{{{j + 1}}}"
+            
             if self.constraint_signs[i] == 1:
-                constraint += " >= "
+                constraint += f" \\geq "
             elif self.constraint_signs[i] == 0:
-                constraint += " = "
+                constraint += f" = "
             else:
-                constraint += " <= "
-            constraint += str(self.constraint_rhs[i])
+                constraint += f" \\leq "
+            constraint += f"{self.constraint_rhs[i]}$"
             print(constraint)
 
         for j in range(self.num_vars):
-            variable = "x" + str(j + 1)
+            variable = f"$x_{{{j + 1}}}"
             if self.variable_signs[j] == 1:
-                variable += " >= 0"
+                variable += f" \\geq 0$"
             elif self.variable_signs[j] == -1:
-                variable += " <= 0"
+                variable += f" \\leq 0$"
             else:
-                break
+                variable += "$ is free"
             print(variable)
 
     def convert_to_standard_form(self):
@@ -271,25 +326,24 @@ class LinearProgrammingProblem:
     def process_output(self, tableau, result):
         print("Tableau:", tableau)
         print("Result code:", result)
-
-        output = "===== RESULT =====\n\n"
+        output = "## RESULT\n\n"
         if result == 1:
             if self.is_min:
-                output += "=> The problem is UNBOUNDED. MIN z = -infinity\n"
+                output += "=> The problem is UNBOUNDED. $\\min z = -\\infty$\n"
             else:
-                output += "=> The problem is UNBOUNDED. MAX z = +infinity\n"
+                output += "=> The problem is UNBOUNDED. $\\max z = +\\infty$\n"
         elif result == 0:
             if self.is_min:
-                output += f"MIN z = {-tableau[0, -1]}\n"
+                output += f"$\\min z = {-tableau[0, -1]}$\n"
             else:
-                output += f"MAX z = {tableau[0, -1]}\n"
+                output += f"$\\max z = {tableau[0, -1]}$\n"
 
             pivots = np.array([self.find_pivot_column(tableau, i) for i in range(tableau.shape[1] - 1)])
             if self.check_unique_solution(tableau, pivots):
                 output += "=> UNIQUE SOLUTION. The optimal solution is:\n"
                 for j in range(self.num_vars - self.num_new_vars):
                     if tableau[0, j] != 0:
-                        output += f"x{j + 1} = 0\n"
+                        output += f"$x_{{{j + 1}}} = 0$\n"
                         continue
                     count = 0
                     index = 0
@@ -298,9 +352,9 @@ class LinearProgrammingProblem:
                             count += 1
                             index = i
                     if self.variable_signs[j] == -1:
-                        output += f"x{j + 1} = {-tableau[index, -1]}\n"
+                        output += f"$x_{{{j + 1}}} = {-tableau[index, -1]}$\n"
                     else:
-                        output += f"x{j + 1} = {tableau[index, -1]}\n"
+                        output += f"$x_{{{j + 1}}} = {tableau[index, -1]}$\n"
             else:
                 output += "=> MULTIPLE SOLUTIONS. The optimal solution set is:\n"
                 sign = np.array([
@@ -310,16 +364,16 @@ class LinearProgrammingProblem:
                 for i in range(self.num_vars - self.num_new_vars):
                     if pivots[i] == -1:
                         if abs(tableau[0, i]) > 1e-4:
-                            output += f"x{i + 1} = 0\n"
+                            output += f"$x_{{{i + 1}}} = 0$\n"
                         else:
                             if self.variable_signs[i] == 0:
-                                output += f"x{i + 1} is free\n"
+                                output += f"$x_{{{i + 1}}}$ is free\n"
                             elif self.variable_signs[i] == 1:
-                                output += f"x{i + 1} >= 0\n"
+                                output += f"$x_{{{i + 1}}} \\geq 0$\n"
                             else:
-                                output += f"x{i + 1} <= 0\n"
+                                output += f"$x_{{{i + 1}}} \\leq 0$\n"
                     else:
-                        root = f"x{i + 1} = {sign[i] * tableau[pivots[i], -1]}"
+                        root = f"$x_{{{i + 1}}} = {sign[i] * tableau[pivots[i], -1]}"
                         for j in range(tableau.shape[1] - 1):
                             if (abs(tableau[0, j]) > 1e-4) or (pivots[j] != -1) or (j == i):
                                 continue
@@ -329,11 +383,21 @@ class LinearProgrammingProblem:
                             coeff = -sign[i] * sign[j] * tableau[pivots[i], j]
                             if coeff == 0:
                                 continue
+                            # Convert variable name to LaTeX format
+                            latex_name = name.replace("x", "x_").replace("w", "w_")
+                            if len(latex_name) > 2:  # Has subscript
+                                latex_name = latex_name.replace("_", "_{") + "}"
                             if coeff > 0:
-                                root += f" + {coeff}{name}"
+                                if coeff == 1:
+                                    root += f" + {latex_name}"
+                                else:
+                                    root += f" + {coeff}{latex_name}"
                             else:
-                                root += f" {coeff}{name}"
-                        output += root + "\n"
+                                if coeff == -1:
+                                    root += f" - {latex_name}"
+                                else:
+                                    root += f" {coeff}{latex_name}"
+                        output += root + "$\n"
                 output += "Subject to:\n"
                 for i in range(tableau.shape[1] - 1):
                     if (i >= self.num_vars - self.num_new_vars) and (i < self.num_vars):
@@ -346,17 +410,21 @@ class LinearProgrammingProblem:
                         if abs(tableau[0, i]) < 1e-4:
                             check_root, name = self.find_variable_name(tableau, i)
                             if check_root == 1:
+                                # Convert variable name to LaTeX format
+                                latex_name = name.replace("x", "x_").replace("w", "w_")
+                                if len(latex_name) > 2:  # Has subscript
+                                    latex_name = latex_name.replace("_", "_{") + "}"
                                 if i >= self.num_vars - self.num_new_vars:
-                                    output += f"{name} >= 0\n"
+                                    output += f"${latex_name} \\geq 0$\n"
                                 else:
                                     if self.variable_signs[i] == 0:
-                                        output += f"{name} is free\n"
+                                        output += f"${latex_name}$ is free\n"
                                     elif self.variable_signs[i] < 0:
-                                        output += f"{name} <= 0\n"
+                                        output += f"${latex_name} \\leq 0$\n"
                                     else:
-                                        output += f"{name} >= 0\n"
+                                        output += f"${latex_name} \\geq 0$\n"
                     else:
-                        root = f"{sign[i] * tableau[pivots[i], -1]}"
+                        root = f"${sign[i] * tableau[pivots[i], -1]}"
                         for j in range(tableau.shape[1] - 1):
                             if (abs(tableau[0, j]) > 1e-4) or (pivots[j] != -1):
                                 continue
@@ -366,11 +434,21 @@ class LinearProgrammingProblem:
                             coeff = -sign[i] * sign[j] * tableau[pivots[i], j]
                             if coeff == 0:
                                 continue
+                            # Convert variable name to LaTeX format
+                            latex_name = name.replace("x", "x_").replace("w", "w_")
+                            if len(latex_name) > 2:  # Has subscript
+                                latex_name = latex_name.replace("_", "_{") + "}"
                             if coeff > 0:
-                                root += f" + {coeff}{name}"
+                                if coeff == 1:
+                                    root += f" + {latex_name}"
+                                else:
+                                    root += f" + {coeff}{latex_name}"
                             else:
-                                root += f" {coeff}{name}"
-                        root += " >= 0"
+                                if coeff == -1:
+                                    root += f" - {latex_name}"
+                                else:
+                                    root += f" {coeff}{latex_name}"
+                        root += " \\geq 0$"
                         output += root + "\n"
         else:
             output += "NO SOLUTION\n"
