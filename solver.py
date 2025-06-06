@@ -258,6 +258,95 @@ class LinearProgrammingProblem:
                 return -1
         return xPivot
     
+    def two_phase_method(self, tableau, tableau_list):
+        # -----------------------
+        # 1) PHASE 1 (Artificial)
+        # -----------------------
+        phase1_history = []
+
+        tableauP1 = np.zeros((tableau.shape[0], tableau.shape[1] + 1))
+        tableauP1[0, -2] = 1.0
+        tableauP1[1:, -2] = -np.ones((tableau.shape[0] - 1,))
+        tableauP1[1:, : tableau.shape[1] - 1] = tableau[1:, : tableau.shape[1] - 1]
+        tableauP1[1:, -1] = tableau[1:, -1]
+
+        xPivot, yPivot = -1, tableauP1.shape[1] - 2
+        minB = 0.0
+        for i in range(tableauP1.shape[0]):
+            if tableauP1[i, yPivot] < minB:
+                minB = tableauP1[i, yPivot]
+                xPivot = i
+
+        if xPivot != -1:
+            tableauP1, xPivot, yPivot = self.rotate_pivot(tableauP1, xPivot, yPivot)
+            phase1_history.append(np.copy(tableauP1))
+
+            tableauP1, check1, phase1_history = self.dantzig_method(
+                tableauP1, phase1_history, phase1=True
+            )
+
+            # Nếu Phase 1 vô nghiệm, append snapshot gốc và trả về
+            for j in range(tableauP1.shape[1] - 2):
+                if abs(tableauP1[0, j]) > 1e-8:
+                    phase1_history.append(np.copy(tableau))
+                    # Chỉ làm sạch Phase 1 (so sánh các bảng cùng shape 4×7)
+                    phase1_clean = self._remove_consecutive_duplicates(phase1_history)
+                    tableau_list.extend(phase1_clean)
+                    return tableau, -1, tableau_list
+
+        # Nếu xPivot == -1, Phase 1 đã feasible ngay (chưa pivot thêm).
+
+        # -----------------------------
+        # 2) PHASE 2 (Pivot bình thường)
+        # -----------------------------
+        phase2_history = []
+
+        # Gán lại từ tableauP1 về tableau (giữ nguyên shape 4×6)
+        tableau[1:, : tableau.shape[1] - 1] = tableauP1[1:, : tableau.shape[1] - 1]
+        tableau[1:, -1] = tableauP1[1:, -1]
+
+        # Snapshot đầu tiên Phase 2
+        phase2_history.append(np.copy(tableau))
+
+        # Pivot qua các cột j=0..(shape[1]-2)
+        for j in range(tableau.shape[1] - 1):
+            xPivot = self.find_pivot_column(tableau, j)
+            if xPivot == -1:
+                continue
+            tableau, xPivot, j = self.rotate_pivot(tableau, xPivot, j)
+            phase2_history.append(np.copy(tableau))
+
+        # Cuối cùng, kiểm tra Dantzig pivot còn không
+        _, _, check2 = self.choose_pivot_dantzig(tableau, -1, -1, phase1=False)
+        if check2 == 1:
+            tableau, check3, phase2_history = self.dantzig_method(tableau, phase2_history)
+
+        # Bây giờ ta chỉ “làm sạch” Phase 2_history (tất cả đều có shape 4×6)
+        phase2_clean = self._remove_consecutive_duplicates(phase2_history)
+
+        # Cuối cùng ghép Phase 1 + Phase 2 đã “làm sạch” vào tableau_list
+        phase1_clean = self._remove_consecutive_duplicates(phase1_history)
+        tableau_list.extend(phase1_clean)
+        tableau_list.extend(phase2_clean)
+
+        return tableau, (check3 if 'check3' in locals() else 0), tableau_list
+
+
+    def _remove_consecutive_duplicates(self, history_list):
+        """
+        Nhận vào một list các numpy arrays (cùng shape) và trả về list đã loại
+        bỏ mọi phần tử mà nó giống y hệt phần tử ngay trước đó.
+        """
+        if not history_list:
+            return []
+
+        cleaned = [history_list[0]]
+        for tbl in history_list[1:]:
+            if not np.allclose(cleaned[-1], tbl):
+                cleaned.append(tbl)
+        return cleaned
+
+    
     def check_unique_solution(self, tableau, pivots):
         for i in range(tableau.shape[1] - 1):
             if (i >= self.num_vars - self.num_new_vars) and (i < self.num_vars):
