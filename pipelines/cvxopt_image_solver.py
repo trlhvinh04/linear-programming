@@ -14,7 +14,10 @@ class Pipeline:
       - Gọi Vision API, parse JSON
       - Chuyển constraint “≥ → ≤”
       - Ghép G và A (nếu có) mà không báo lỗi khi A/b = None hoặc rỗng
-      - Đưa mảng variable_signs trực tiếp xuống solver để solver tự xử lý biến.
+      - Ghép mảng variable_signs trực tiếp xuống solver để solver tự xử lý biến.
+      - Nếu trong prompt có chứa “dantzig”/“đơn hình” → force dùng Dantzig
+        Nếu có chứa “bland” → force dùng Bland
+        Nếu có chứa “hai pha”/“2 pha”/“two phase”/“two-phase” → force dùng Two‐phase
     """
 
     class Valves(BaseModel):
@@ -23,7 +26,7 @@ class Pipeline:
             description="URL của Vision API endpoint."
         )
         VISION_API_KEY: str = Field(
-            default="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",
+            default="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",
             description="API Key cho Vision API (bắt buộc)."
         )
         VISION_MODEL_ID: str = Field(
@@ -186,7 +189,7 @@ class Pipeline:
         """
         Xử lý request, chỉ support LP.
 
-        Trả về HTML chứa kết quả (solver trả về).
+        Trả về HTML/Text chứa kết quả (solver trả về).
         """
 
         print(f"[{self.name}] PIPE called. Stream? {body.get('stream', False)}")
@@ -253,15 +256,15 @@ class Pipeline:
         print(f"[{self.name}] Problem data:\n{json.dumps(problem_data, indent=2, ensure_ascii=False)}")
 
         # --- (4) PARSE CÁC MẢNG trong JSON ---
-        problem_type = problem_data.get("problem_type", "LP").upper()
-        objective_type = problem_data.get("objective_type", "minimize").lower()
-        c_list = problem_data.get("c")
-        G_list = problem_data.get("G")
-        h_list = problem_data.get("h")
-        A_list = problem_data.get("A")                    # Có thể None hoặc list
-        b_list = problem_data.get("b")                    # Có thể None hoặc list
-        signs_list = problem_data.get("constraint_signs") # [-1,0,+1] hoặc None
-        var_signs_list = problem_data.get("variable_signs") # [1,0,-1] hoặc None
+        problem_type    = problem_data.get("problem_type", "LP").upper()
+        objective_type  = problem_data.get("objective_type", "minimize").lower()
+        c_list          = problem_data.get("c")
+        G_list          = problem_data.get("G")
+        h_list          = problem_data.get("h")
+        A_list          = problem_data.get("A")                     # Có thể None hoặc list
+        b_list          = problem_data.get("b")                     # Có thể None hoặc list
+        signs_list      = problem_data.get("constraint_signs")      # [-1,0,+1] hoặc None
+        var_signs_list  = problem_data.get("variable_signs")        # [1,0,-1] hoặc None
 
         # Kiểm tra problem_type
         if problem_type != "LP":
@@ -274,7 +277,7 @@ class Pipeline:
         try:
             # Chuyển c, G, h sang numpy
             c_internal = [float(x) for x in c_list]
-            num_vars = len(c_internal)
+            num_vars   = len(c_internal)
 
             G_np = np.array(G_list, dtype=float)
             h_np = np.array(h_list, dtype=float)
@@ -291,7 +294,7 @@ class Pipeline:
                 if A_np.ndim != 2 or A_np.shape[1] != num_vars or \
                    b_np.ndim != 1 or A_np.shape[0] != b_np.shape[0]:
                     return "Lỗi: Kích thước A/b không khớp với số biến."
-                # Ghép G và A (hàng A là đẳng thức, sẽ mark sign=0)
+                # Ghép G và A (hàng A là đẳng thức, sẽ mark sign = 0)
                 G_np = np.vstack([G_np, A_np])
                 h_np = np.concatenate([h_np, b_np])
                 num_cons = G_np.shape[0]
@@ -318,14 +321,14 @@ class Pipeline:
         for i, s in enumerate(constraint_signs):
             if s == 1:
                 # a_i x ≥ b_i  →  (−a_i) x ≤ −b_i
-                G_np[i, :] *= -1
-                h_np[i] *= -1
+                G_np[i, :]    *= -1
+                h_np[i]       *= -1
                 constraint_signs[i] = -1
 
         # CHÚ Ý: KHÔNG tự đổi biến “x ≤ 0 → x' ≥ 0” tại đây.
         # Solver.py đã có sẵn logic để xử lý variable_signs.
 
-        # --- (6) Khởi tạo solver và gọi solve() ---
+        # --- (6) Khởi tạo solver và (nếu cần) áp override thuật toán ---
         is_min_flag = (objective_type == "minimize")
         try:
             lp_solver = LinearProgrammingProblem(
@@ -338,11 +341,33 @@ class Pipeline:
                 constraint_signs=constraint_signs,
                 variable_signs=variable_signs
             )
+        except Exception as e:
+            return f"Lỗi khi khởi tạo LP solver: {e}"
+
+        # === BẮT ĐỀU override THUẬT TOÁN TỪ 'user_text_prompt' ===
+        prompt_lower = user_text_prompt.lower()
+
+        # Nếu có từ khoá "dantzig" hoặc "đơn hình", force Dantzig (return 0)
+        if "dantzig" in prompt_lower or "đơn hình" in prompt_lower:
+            lp_solver.choose_algorithm = lambda: 0
+
+        # Nếu có từ khoá "bland", force Bland (return 1)
+        elif "bland" in prompt_lower:
+            lp_solver.choose_algorithm = lambda: 1
+
+        # Nếu có từ khoá "hai pha" / "2 pha" / "two phase" / "two-phase", force Two‐phase (return 2)
+        elif ("hai pha" in prompt_lower 
+              or "2 pha" in prompt_lower 
+              or "two phase" in prompt_lower 
+              or "two-phase" in prompt_lower):
+            lp_solver.choose_algorithm = lambda: 2
+
+        # Nếu không detect được từ khoá, solver sẽ tự động chọn thuật toán qua choose_algorithm() gốc.
+
+        # --- (7) Gọi solve() và trả kết quả ---
+        try:
             output_html = lp_solver.solve()
         except Exception as e:
             return f"Lỗi khi chạy custom LP solver: {e}"
 
-        # --- (7) Trả kết quả về client ---
         return output_html
-
-
