@@ -9,6 +9,7 @@ from solver import LinearProgrammingProblem  # solver.py đã có sẵn, không 
     
 
 API_KEYS = [
+    "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"
     "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",
     "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",
     "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",
