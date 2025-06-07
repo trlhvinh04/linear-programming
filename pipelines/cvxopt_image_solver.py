@@ -3,12 +3,13 @@ import json
 import base64
 import requests
 import numpy as np
+import hashlib
 from pydantic import BaseModel, Field
 from solver import LinearProgrammingProblem  # solver.py đã có sẵn, không cần sửa
     
 
 API_KEYS = [
-    "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",
+    "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",
     "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",
     "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",
     "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",
@@ -41,6 +42,18 @@ class Pipeline:
             default="qwen/qwen2.5-vl-72b-instruct:free",
             description="Model ID cho Vision API."
         )
+        TEMPERATURE: float = Field(
+            default=0.1,
+            description="Temperature cho Vision Model (0.0-2.0). Giá trị thấp = ít ngẫu nhiên, giá trị cao = nhiều ngẫu nhiên."
+        )
+        ENABLE_CACHE: bool = Field(
+            default=True,
+            description="Bật/tắt cache để tiết kiệm API calls."
+        )
+        MAX_CACHE_SIZE: int = Field(
+            default=100,
+            description="Số lượng tối đa entries trong cache."
+        )
         MAX_TOKENS_VISION_API: int = Field(
             default=3000,
             description="Số token tối đa cho Vision API."
@@ -49,6 +62,7 @@ class Pipeline:
     def __init__(self):
         self.name = "LP Image Solver Pipeline (Custom)"
         self.current_api_key_index = 0  # Theo dõi API key hiện tại
+        self.cache = {}  # Cache để lưu kết quả API calls
         valves_defaults = self.Valves().model_dump()
         self.valves = self.Valves(
             **{
@@ -56,9 +70,13 @@ class Pipeline:
                 "VISION_API_KEY": os.getenv("VISION_API_KEY", valves_defaults["VISION_API_KEY"]),
                 "VISION_MODEL_ID": os.getenv("VISION_MODEL_ID", valves_defaults["VISION_MODEL_ID"]),
                 "MAX_TOKENS_VISION_API": int(os.getenv("MAX_TOKENS_VISION_API", valves_defaults["MAX_TOKENS_VISION_API"])),
+                "TEMPERATURE": float(os.getenv("TEMPERATURE", valves_defaults["TEMPERATURE"])),
+                "ENABLE_CACHE": bool(os.getenv("ENABLE_CACHE", valves_defaults["ENABLE_CACHE"])),
+                "MAX_CACHE_SIZE": int(os.getenv("MAX_CACHE_SIZE", valves_defaults["MAX_CACHE_SIZE"])),
             }
         )
         print(f"[{self.name}] Initialized. Vision API Key set: {'Yes' if self.valves.VISION_API_KEY else 'No (REQUIRED!)'}")
+        print(f"[{self.name}] Cache enabled: {self.valves.ENABLE_CACHE}, Max cache size: {self.valves.MAX_CACHE_SIZE}")
         if not self.valves.VISION_API_KEY:
             print(f"[{self.name}] WARNING: VISION_API_KEY is empty! Pipeline sẽ không hoạt động đúng.")
 
@@ -73,6 +91,42 @@ class Pipeline:
         if API_KEYS:
             self.current_api_key_index = (self.current_api_key_index + 1) % len(API_KEYS)
             print(f"[{self.name}] Chuyển sang API key thứ {self.current_api_key_index + 1}")
+
+    def _generate_cache_key(self, image_bytes: bytes, prompt_instruction: str) -> str:
+        """Tạo cache key từ image bytes và prompt"""
+        image_hash = hashlib.md5(image_bytes).hexdigest()
+        prompt_hash = hashlib.md5(prompt_instruction.encode('utf-8')).hexdigest()
+        return f"{image_hash}_{prompt_hash}"
+
+    def _get_from_cache(self, cache_key: str) -> dict | None:
+        """Lấy kết quả từ cache"""
+        if not self.valves.ENABLE_CACHE:
+            return None
+        return self.cache.get(cache_key)
+
+    def _save_to_cache(self, cache_key: str, data: dict):
+        """Lưu kết quả vào cache với giới hạn kích thước"""
+        if not self.valves.ENABLE_CACHE:
+            return
+        
+        # Nếu cache đã đầy, xóa entry cũ nhất (FIFO)
+        if len(self.cache) >= self.valves.MAX_CACHE_SIZE:
+            oldest_key = next(iter(self.cache))
+            del self.cache[oldest_key]
+            
+        self.cache[cache_key] = data
+        print(f"[{self.name}] Saved to cache. Cache size: {len(self.cache)}/{self.valves.MAX_CACHE_SIZE}")
+
+    def clear_cache(self):
+        """Xóa toàn bộ cache - có thể gọi từ bên ngoài"""
+        self.cache.clear()
+        print(f"[{self.name}] Cache cleared.")
+
+    def get_cache_info(self) -> str:
+        """Trả về thông tin cache"""
+        if not self.valves.ENABLE_CACHE:
+            return "Cache bị tắt"
+        return f"Cache: {len(self.cache)}/{self.valves.MAX_CACHE_SIZE} entries"
 
     async def on_startup(self):
         print(f"[{self.name}] Started.")
@@ -118,6 +172,13 @@ class Pipeline:
         Nếu thiếu khóa quan trọng hoặc lỗi parse, trả về False + thông báo lỗi.
         """
 
+        # Kiểm tra cache trước
+        cache_key = self._generate_cache_key(image_bytes, prompt_instruction or "")
+        cached_result = self._get_from_cache(cache_key)
+        if cached_result is not None:
+            print(f"[{self.name}] Cache hit! Trả về kết quả từ cache.")
+            return True, cached_result
+
         current_api_key = self._get_current_api_key()
         if not current_api_key:
             return False, "Lỗi cấu hình: Không có API key khả dụng."
@@ -145,6 +206,87 @@ class Pipeline:
         - variable_signs[j]   =  1 nghĩa là x_j ≥ 0, =0 nghĩa là x_j tự do, =-1 nghĩa là x_j ≤ 0.
         Nếu không trích được, trả về {}.
         """
+        user_prompt = """
+        QUAN TRỌNG TUYỆT ĐỐI: Phản hồi của bạn BẮT BUỘC CHỈ ĐƯỢC PHÉP LÀ MỘT ĐỐI TƯỢNG JSON HỢP LỆ. KHÔNG được có bất kỳ ký tự, từ ngữ, câu văn, lời giải thích, lời chào, hay bất kỳ văn bản nào khác nằm ngoài bản thân đối tượng JSON đó. Phản hồi phải bắt đầu bằng '{' và kết thúc bằng '}'. Nếu bạn không thể trích xuất thành JSON, hãy trả về một đối tượng JSON rỗng là {}.
+        `
+        Bạn là một chuyên gia toán học có nhiệm vụ đọc và trích xuất thông tin từ hình ảnh của một bài toán Quy hoạch Tuyến tính (LP). Hãy tuân thủ nghiêm ngặt các bước sau để tạo đối tượng JSON cuối cùng.
+
+        Cấu trúc JSON mục tiêu:
+        {
+            "problem_type": "LP",
+            "objective_type": "maximize" | "minimize",
+            "c": [...],
+            "constraint_signs": [...],
+            "G": [[...]],
+            "h": [...],
+            "A": [[...]],
+            "b": [...],
+            "variable_signs": [...]
+        }
+
+        Hướng dẫn chi tiết:
+
+        1.  Loại bài toán (`problem_type`):
+            - Giá trị này phải luôn là chuỗi "LP".
+
+        2.  Loại hàm mục tiêu (`objective_type`):
+            - Xác định bài toán là tìm "maximize" (tối đa) hay "minimize" (tối thiểu).
+
+        3.  Vector chi phí (`c`):
+            - Trích xuất các hệ số của các biến trong hàm mục tiêu và đưa vào một danh sách (list) các số thực. Thứ tự các hệ số phải tương ứng với thứ tự các biến (x_1, x_2, ...).
+
+        4.  Xử lý Ràng buộc Chính (`G`, `h`, `constraint_signs`):
+            - Xác định tất cả các ràng buộc bất đẳng thức (`<=`, `>=`) và đẳng thức (`=`).
+            - Với mỗi ràng buộc, hãy trích xuất các hệ số của biến ở vế trái vào một hàng của ma trận `G`.
+            - Trích xuất hằng số ở vế phải vào vector `h`.
+            - Tạo vector `constraint_signs` tương ứng. Với mỗi ràng buộc `i`:
+                - Nếu là dạng `... <= ...`, đặt `constraint_signs[i] = -1`.
+                - Nếu là dạng `... = ...`, đặt `constraint_signs[i] = 0`.
+                - Nếu là dạng `... >= ...`, đặt `constraint_signs[i] = 1`.
+            - QUAN TRỌNG: Thứ tự các hàng trong `G`, các phần tử trong `h`, và các giá trị trong `constraint_signs` phải khớp với nhau một cách chính xác.
+
+        5.  Ràng buộc Đẳng thức (`A`, `b`):
+            - Trường này dùng để thể hiện riêng các ràng buộc đẳng thức.
+            - Nếu có ràng buộc dạng `... = ...`, hãy đưa các hệ số vế trái vào ma trận `A` và hằng số vế phải vào vector `b`.
+            - LƯU Ý: Để nhất quán, bạn có thể chọn một trong hai cách biểu diễn đẳng thức:
+                - Cách 1 (Ưu tiên): Biểu diễn trong `G`, `h` với `constraint_signs` là `0`, và để `A`, `b` là danh sách rỗng (`[]`).
+                - Cách 2: Biểu diễn trong `A` và `b`, và không đưa vào `G`, `h`.
+            - Nếu không có ràng buộc đẳng thức, hãy để `A` và `b` là danh sách rỗng (`[]`).
+
+        6.  Dấu của Biến (`variable_signs`):
+            - Đây là phần cực kỳ quan trọng để xác định miền giá trị của từng biến. KHÔNG đưa các ràng buộc dấu của biến (ví dụ: `x >= 0`) vào ma trận `G`.
+            - Tạo một vector `variable_signs` có độ dài bằng số lượng biến. Với mỗi biến `x_j`:
+                - Nếu `x_j >= 0` (hoặc không có ghi chú gì, mặc định là không âm), đặt `variable_signs[j] = 1`.
+                - Nếu `x_j <= 0`, đặt `variable_signs[j] = -1`.
+                - Nếu `x_j` tự do (unrestricted in sign), đặt `variable_signs[j] = 0`.
+
+        Ví dụ về cách áp dụng (Lưu ý đầu vào của ảnh có thể khác biệt):
+
+        Cho bài toán:
+        Maximize Z = 5*x1 + 3*x2
+        Subject to:
+        1*x1 + 1*x2 <= 10
+        2*x1 + 1*x2 >= 16
+        x2 = 5
+        x1 >= 0, x2 <= 0
+
+        Kết quả JSON (áp dụng cách 1 cho đẳng thức):
+        {
+            "problem_type": "LP",
+            "objective_type": "maximize",`
+            "c": [5.0, 3.0],
+            "constraint_signs": [-1, 1, 0],
+            "G": [[1.0, 1.0], [2.0, 1.0], [0.0, 1.0]],
+            "h": [10.0, 16.0, 5.0],
+            "A": [],
+            "b": [],
+            "variable_signs": [1, -1]
+        }
+
+        Nếu không trích xuất được thông tin, hãy trả về `{}`.
+        
+        """
+        
         if prompt_instruction:
             user_prompt += f"\n\nLưu ý thêm: {prompt_instruction}"
 
@@ -172,6 +314,7 @@ class Pipeline:
                     }
                 ],
                 "max_tokens": self.valves.MAX_TOKENS_VISION_API,
+                "temperature": self.valves.TEMPERATURE,
             }
 
             # Thử với API key hiện tại, có retry cho JSON parse error
@@ -214,6 +357,7 @@ class Pipeline:
                     problem_data.setdefault("b", None)
 
                     print(f"[{self.name}] API key thứ {self.current_api_key_index + 1} thành công!")
+                    self._save_to_cache(cache_key, problem_data)
                     return True, problem_data
 
                 except requests.exceptions.Timeout:
