@@ -8,13 +8,25 @@ from pydantic import BaseModel, Field
 from solver import LinearProgrammingProblem  # solver.py đã có sẵn, không cần sửa
     
 
-API_KEYS = [
-    "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"
-    "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",
-    "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",
-    "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",
-    "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",
-]
+# Load API keys from environment variables
+def load_api_keys_from_env():
+    """Load API keys from environment variables"""
+    keys = []
+    for i in range(1, 11):  # Check for API_KEY_1 to API_KEY_10
+        key = os.getenv(f"API_KEY_{i}")
+        if key:
+            keys.append(key)
+    
+    # If no keys found in environment, use default backup
+    if not keys:
+        backup_key = os.getenv("VISION_API_KEY")
+        if backup_key:
+            keys.append(backup_key)
+    
+    print(f"[Pipeline] Loaded {len(keys)} API keys from environment variables")
+    return keys
+
+API_KEYS = load_api_keys_from_env()
 
 class Pipeline:
     """
