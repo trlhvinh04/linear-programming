@@ -1,19 +1,45 @@
 services:
   openwebui:
-      image: ghcr.io/open-webui/open-webui:main
-      ports:
-        - "3000:8080"
-      volumes:
-        - open-webui:/app/backend/data
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui:/app/backend/data
+    environment:
+      - ENABLE_PIPELINES=true
+      - PIPELINES_URL=http://pipelines:9099
+    depends_on:
+      - pipelines
+    networks:
+      - webui-network
 
   pipelines:
-      image: ghcr.io/open-webui/pipelines:main
-      volumes:
-        - pipelines:/app/pipelines
-      restart: always
-      environment:
-        - PIPELINES_API_KEY=0p3n-w3bu!
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "9099:9099"
+    volumes:
+      - ./pipelines:/app/pipelines
+      - ./solver.py:/app/solver.py
+      - ./main.py:/app/main.py
+      - ./config.py:/app/config.py
+      - ./schemas.py:/app/schemas.py
+      - ./utils:/app/utils
+      - ./blueprints:/app/blueprints
+      - pipelines-data:/app/data
+    env_file:
+      - docker.env
+    environment:
+      - PIPELINES_API_KEY=0p3n-w3bu!
+    restart: unless-stopped
+    networks:
+      - webui-network
 
 volumes:
   open-webui: {}
-  pipelines: {}
+  pipelines-data: {}
+
+networks:
+  webui-network:
+    driver: bridge
